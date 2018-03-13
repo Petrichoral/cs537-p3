@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -29,18 +30,18 @@ char *map_open(char *fname) {
 
     // Make sure fd points to a regular file (e.g. not a directory)
     if (!S_ISREG(fs.st_mode)) {
-        exit_err("Passed file is irregular.")
+        exit_err("Passed file is irregular.");
     }
 
     // Attempt to map file
     loc = mmap(NULL, fs.st_size, PROT_READ, MAP_SHARED, fd, 0);
     if (loc == MAP_FAILED) {
-        exit_err("Failed to map file.")
+        exit_err("Failed to map file.");
     }
 
     // Close the file descriptor
     if (close(fd) == -1) {
-        exit_err("Failed to close file.")
+        exit_err("Failed to close file.");
     }
 
     // Return pointer to first address in the map
