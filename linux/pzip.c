@@ -10,7 +10,7 @@
 
 #define CHUNK_SIZE 4096         // Default chunk size
 #define QUEUE_SIZE 10           // Size of shared prod-consumer buffer
-#define INIT_HTSZ 20            // Initial size of output buffer
+#define INIT_OUT_BUFFSIZE 16    // Initial size of output buffer
 
 // Holds the relevant info for an unprocessed input chunk
 typedef struct unproc_chunk_data {
@@ -19,33 +19,35 @@ typedef struct unproc_chunk_data {
     char *loc;                  // Chunks starting mem addr
 } unproc_chunk;
 
-// A node in a linked list of RLE character encodings
 struct encoded_char {
-    int num;                    // Number of characters
-    char ch;                    // The character itself
-    struct encoded_char *next;  // Next item in linked list
-};
-typedef struct encoded_char *enc_ch_node;
+    int num;
+    char ch;
+} __attribute__((packed));
+typedef struct encoded_char enc_ch;
 
-// Holds the relevant info for a encoded output chunk
 typedef struct proc_chunk_data {
-    enc_ch_node head;
-    enc_ch_node tail;
+    int numElements;
+    int size;
+    enc_ch *buffer;
 } proc_chunk;
 
+char get_last_ch(int chunkID);
+char get_first_ch(int chunkID);
+void set_first_num(int chunkID, int n);
+int get_first_num(int chunkID);
+int get_last_num(int chunkID);
 unproc_chunk *do_get();
 void do_fill(unproc_chunk *c);
 void *consumer(void *arg);
 void *producer(void *arg);
 void encode_chunk(unproc_chunk *c);
-enc_ch_node create_enc_char();
-enc_ch_node add_enc_char(enc_ch_node tail, int num, char ch);
-void free_enc_chunk(enc_ch_node chunk);
+void add_enc_ch(proc_chunk *output, int ch_count, char prev_ch);
 char *map_open(char *fname, int *size);
 void map_close(char *loc, int *size);
 void exit_err(char *message);
 
 void *Malloc(size_t size);
+void *Realloc(void *ptr, size_t size);
 void Mutex_lock(pthread_mutex_t *mutex);
 void Mutex_unlock(pthread_mutex_t *mutex);
 void Cond_wait(pthread_cond_t *restrict cond, pthread_mutex_t *restrict mutex);
@@ -95,8 +97,6 @@ int main(int argc, char *argv[]) {
     int outBuffSize = (totalSize / CHUNK_SIZE) + 1;
     outBuff = (proc_chunk *)Malloc(outBuffSize * sizeof(proc_chunk));
 
-    outBuff[0].head = NULL;
-
     // No. of consumers = total cores - 1 (reserve 1 core for producer)
     int consumers = get_nprocs();
     if (consumers > 1) {
@@ -109,48 +109,81 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < consumers; i++) {
         Pthread_create(&cid[i], NULL, consumer, NULL);
     }
+
+    // Join threads
     Pthread_join(pid, NULL);
-    
     for (int i = 0; i < consumers; i++) {
         Pthread_join(cid[i], NULL);
     }
 
     // Stitch files back together
-    enc_ch_node curr = outBuff[0].head;
-    while (curr != outBuff[0].tail) {
-        fwrite(&(curr->num), sizeof(int), 1, stdout);
-        fputc(curr->ch, stdout);
-        curr = curr->next;
-    }
-    for (int i = 1; i < numChunks; i++) {
-        if (curr->ch == outBuff[i].head->ch) {
-            int count = curr->num + outBuff[i].head->num;
-            fwrite(&count, sizeof(int), 1, stdout);
-            fputc(curr->ch, stdout);
-            curr = outBuff[i].head;
-            curr = curr->next;
+    int length = 0;
+    for (int i = 0; i < numChunks - 1; i++) {
+        length = outBuff[i].numElements;
+        if (get_last_ch(i) == get_first_ch(i + 1)) {
+            set_first_num(i + 1, get_first_num(i + 1) + get_last_num(i));
+            if (length > 1) {
+                fwrite(outBuff[i].buffer, sizeof(enc_ch), length - 1, stdout);
+            }
         }
-        while (curr != outBuff[i].tail) {
-            fwrite(&(curr->num), sizeof(int), 1, stdout);
-            fputc(curr->ch, stdout);
-            curr = curr->next;
+        else {
+            fwrite(outBuff[i].buffer, sizeof(enc_ch), length, stdout);
         }
     }
+    length = outBuff[numChunks - 1].numElements;
+    fwrite(outBuff[numChunks - 1].buffer, sizeof(enc_ch), length, stdout);
+    
+    // for (int i = 0; i < numChunks; i++) {
+    //     if (outBuff[i].buffer == NULL) {
+    //         printf("Null buffer entry occurred at index %d, with size %d and number of elements %d.\n", i, outBuff[i].size, outBuff[i].numElements);
+    //     }
+    // }
 
-    for (int i = 0; i < numChunks; i++) {
-        free_enc_chunk(outBuff[i].head);
-    }
-    free(fptrs);
-    free(fsizes);
-    free(chunkBuff);
-    free(outBuff);
+    // for (int i = 0; i < numFiles; i++) {
+    //     map_close(fptrs[i], fsizes + i);
+    // }
+    // free(fptrs);
+    // free(fsizes);
+    // free(chunkBuff);
+    // free(outBuff);
 
+    // printf("Number of chunks = %d\n", numChunks);
     return 0;
+}
+
+char get_last_ch(int chunkID) {
+    if (outBuff[chunkID].numElements > 1) {
+        return outBuff[chunkID].buffer[(outBuff[chunkID].numElements - 1)].ch;
+    }
+    return get_first_ch(chunkID);
+}
+
+char get_first_ch(int chunkID) {
+    return outBuff[chunkID].buffer[0].ch;
+}
+
+void set_first_num(int chunkID, int n) {
+    outBuff[chunkID].buffer[0].num = n;
+}
+
+int get_first_num(int chunkID) {
+    return outBuff[chunkID].buffer[0].num;
+}
+
+int get_last_num(int chunkID) {
+    if (outBuff[chunkID].numElements > 1) {
+        return outBuff[chunkID].buffer[(outBuff[chunkID].numElements - 1)].num;
+    }
+    return get_first_num(chunkID);
 }
 
 unproc_chunk *do_get() {
     // Get relevant chunk data from shared queue
-    unproc_chunk *tmp = &chunkBuff[useptr];
+    // unproc_chunk *tmp = &chunkBuff[useptr];
+    unproc_chunk *tmp = (unproc_chunk *)Malloc(sizeof(unproc_chunk));
+    tmp->id = chunkBuff[useptr].id;
+    tmp->size = chunkBuff[useptr].size;
+    tmp->loc = chunkBuff[useptr].loc;
 
     // Increment useptr with wrap around
     useptr = (useptr + 1) % QUEUE_SIZE;
@@ -182,6 +215,12 @@ void *producer(void *arg) {
     
     // Continue to produce chunks until last file is finished
     while (fileInd < numFiles || !fileDone) {
+
+        // NICK - deals with empty file case
+        if (fptrs[fileInd] == NULL) {
+            fileInd++;
+            continue;
+        }
         
         // Reset done flag if file is done but not all files have been chunked
         if (fileDone) {
@@ -215,6 +254,9 @@ void *producer(void *arg) {
         }
         c.id = chunkID;
         chunkID++;
+
+        // printf("Produced chunk %d with size %d.\n", c.id, c.size);
+        // fflush(stdout);
 
         // Aquire lock and fill shared queue
         Mutex_lock(&m);
@@ -259,6 +301,8 @@ void *consumer(void *arg) {
         
         // Process chunk
         encode_chunk(tmp);
+        // printf("\tSize of 2D buffer = %d\n", outBuff[tmp->id].size);
+        // fflush(stdout);
     }
     // printf("Consumer exited.\n");
     // fflush(stdout);
@@ -267,9 +311,11 @@ void *consumer(void *arg) {
 
 void encode_chunk(unproc_chunk *c) {
     proc_chunk *output = &outBuff[c->id];
-
-    output->head = create_enc_char();
-    output->tail = output->head;
+    output->numElements = 0;
+    output->size = INIT_OUT_BUFFSIZE;
+    // printf("\tSize of 2D buffer = %d\n", output->size);
+    // fflush(stdout);
+    output->buffer = (enc_ch *)Malloc(INIT_OUT_BUFFSIZE * sizeof(enc_ch));
 
     char ch;
     char prev_ch = *(c->loc);
@@ -281,39 +327,27 @@ void encode_chunk(unproc_chunk *c) {
             ch_count++;
         }
         else {
-            output->tail = add_enc_char(output->tail, ch_count, prev_ch);
-            ch_count = 1;
+            add_enc_ch(output, ch_count, prev_ch);
+            ch_count = 1;   //Reset char count
         }
         prev_ch = ch;
     }
-    output->tail = add_enc_char(output->tail, ch_count, prev_ch);
-
-    enc_ch_node tmp = output->head;
-    output->head = output->head->next;
-    free(tmp);
+    add_enc_ch(output, ch_count, prev_ch);
 }
 
-enc_ch_node create_enc_char() {
-    enc_ch_node ec = (enc_ch_node)Malloc(sizeof(struct encoded_char));
-    ec->next = NULL;
-    return ec;
-}
-
-enc_ch_node add_enc_char(enc_ch_node tail, int num, char ch) {
-    enc_ch_node ec = create_enc_char();
-    ec->num = num;
-    ec->ch = ch;
-    tail->next = ec;
-    return ec;
-}
-
-void free_enc_chunk(enc_ch_node chunk) {
-    while (chunk != NULL) {
-        enc_ch_node tmp = chunk;
-        chunk = chunk->next;
-        free(tmp);
+void add_enc_ch(proc_chunk *output, int ch_count, char prev_ch) {
+    // If output buffer isn't large enough, resize
+    output->numElements++;
+    while (output->numElements > output->size) {
+        output->size = output->size + (output->size >> 1) + INIT_OUT_BUFFSIZE;
     }
+    output->buffer = (enc_ch *)Realloc(output->buffer, output->size * sizeof(enc_ch));
+
+    // Add encoding to buffer
+    (*(output->buffer + output->numElements - 1)).num = ch_count;
+    (*(output->buffer + output->numElements - 1)).ch = prev_ch;
 }
+
 
 /*******************************************************************************
  * Given a file name, maps the file into the virtual address space. Returns a 
@@ -349,6 +383,11 @@ char *map_open(char *fname, int *size) {
 
     // Record file size in passed integer pointer
     *size = fs.st_size;
+
+    // NICK
+    if (*size <= 0) {
+        return NULL;
+    }
 
     // Attempt to map file
     loc = mmap(NULL, *size, PROT_READ, MAP_SHARED, fd, 0);
@@ -401,6 +440,14 @@ void *Malloc(size_t size) {
         exit_err("Malloc failed.");
     }
     return ptr;
+}
+
+void *Realloc(void *ptr, size_t size) {
+    void *p = realloc(ptr, size);
+    if (p == NULL) {
+        exit_err("Realloc failed.");
+    }
+    return p;
 }
 
 void Mutex_lock(pthread_mutex_t *mutex) {
