@@ -1,0 +1,4 @@
+Whoa, this was intense! I wish that I had had more time!
+
+Basically, I just added null pointer dereferencing and memory protection to xv6. A lot of it was changing the indexing
+of memory to the first page, and manipulating some bits within the page table entries. It was fun!
